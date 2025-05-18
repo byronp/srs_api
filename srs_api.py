@@ -139,7 +139,7 @@ async def calculate_next_review_flexible(
         if not human_readable_date_str: # General fallback
             human_readable_date_str = next_review_date_obj.strftime("%B %d, %Y")
 
-        output_string = f"[[{human_readable_date_str}]] {new_factor:.2f}/{new_interval_days:.2f}"
+        output_string = f"[[date:{human_readable_date_str}]] {new_factor:.2f}/{new_interval_days:.2f}"
         return output_string
 
     except ValueError as ve: # Catch specific errors from our logic
