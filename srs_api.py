@@ -5,7 +5,7 @@ import uvicorn
 import os
 import re
 from typing import Optional
-from starlette.responses import PlainTextResponse
+from starlette.responses import PlainTextResponse  # Keep this for plain text output
 
 # --- Configuration Constants ---
 FACTOR_MODIFIER = 0.15
@@ -18,12 +18,17 @@ DEFAULT_INITIAL_INTERVAL = 0.0
 app = FastAPI(
     title="Simplified Spaced Repetition System (SRS) Calculator",
     description="API to calculate next review date. Input via JSON, Output is a plain string.",
-    version="2.7.0" # Version bump for output date format change
+    version="2.8.0"  # Version bump (from 2.7.0 base, new input srs format)
 )
 
-# --- Pydantic Model for JSON Input (remains the same) ---
+
+# --- Pydantic Model for JSON Input ---
 class SRSInput(BaseModel):
-    srs: Optional[str] = Field(None, description="SRS string: 'Day, Mon DayNum F.FF/I.II'. Optional for new items.")
+    srs: Optional[str] = Field(
+        None,
+        description="SRS string: '[[date:YYYY-MM-DD]] F.FF/I.II'. Optional for new items.",  # UPDATED description
+        examples=["[[date:2028-04-09]] 23.30/1056.10"]  # ADDED example
+    )
     signal: int = Field(..., ge=1, le=4, description="User recall quality (1-4). Required.")
 
 
@@ -63,16 +68,22 @@ def calculate_srs_logic(current_interval_days: float, current_factor: float, sig
     new_factor = round(new_factor, 2)
     return new_interval, new_factor
 
+
 # --- API Endpoint ---
 
-# Regex to parse input "DayAbbrev, MonAbbrev DayNum Factor/Interval"
+# UPDATED Regex to parse input "[[date:YYYY-MM-DD]] Factor/Interval"
+# Example: "[[date:2028-04-09]] 23.30/1056.10"
+# Group 1: YYYY-MM-DD (date string)
+# Group 2: Factor
+# Group 3: Interval
 SRS_STRING_PATTERN = re.compile(
-    r"^([A-Za-z]{3}),\s*([A-Za-z]{3})\s+(\d{1,2})\s+(\d+\.\d+)\/(\d+\.\d+)$"
+    r"^\[\[date:(\d{4}-\d{2}-\d{2})\]\]\s+(\d+\.\d+)\/(\d+\.\d+)$"
 )
+
 
 @app.post("/calculate/", response_class=PlainTextResponse)
 async def calculate_next_review_json_in_string_out(
-    input_data: SRSInput = Body(...)
+        input_data: SRSInput = Body(...)
 ) -> str:
     """
     Calculates the next review details based on JSON input.
@@ -80,7 +91,7 @@ async def calculate_next_review_json_in_string_out(
 
     Input JSON body example (existing item):
     {
-       "srs": "Fri, Apr 25 23.15/45.62",
+       "srs": "[[date:2028-04-09]] 23.30/1056.10", // New format
        "signal": 1
     }
 
@@ -96,20 +107,24 @@ async def calculate_next_review_json_in_string_out(
     if input_data.srs:
         match = SRS_STRING_PATTERN.match(input_data.srs)
         if not match:
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid 'srs' string format in JSON. Expected 'Day, Mon DayNum F.FF/I.II', e.g., 'Fri, Apr 25 23.15/45.62'"
-            )
+            error_detail = f"Invalid 'srs' string format: '{input_data.srs}'. Expected '[[date:YYYY-MM-DD]] F.FF/I.II'"  # UPDATED error message
+            # print(f"ERROR: {error_detail}") # Optional basic print logging
+            raise HTTPException(status_code=400, detail=error_detail)
         try:
-            current_factor_str = match.group(4)
-            current_interval_days_str = match.group(5)
+            # date_string = match.group(1) # We don't use this for calculation
+            current_factor_str = match.group(2)  # UPDATED group index
+            current_interval_days_str = match.group(3)  # UPDATED group index
             current_factor = float(current_factor_str)
             current_interval_days = float(current_interval_days_str)
         except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid numeric values for factor or interval in 'srs' string.")
+            # print(f"ERROR: Invalid numeric values in srs string: {input_data.srs}") # Optional
+            raise HTTPException(status_code=400,
+                                detail="Invalid numeric values for factor or interval in 'srs' string.")
         except IndexError:
+            # print(f"ERROR: Could not parse components from srs string: {input_data.srs}") # Optional
             raise HTTPException(status_code=400, detail="Could not parse all components from 'srs' string.")
     else:
+        # print("INFO: No 'srs' string provided, using defaults.") # Optional
         current_factor = DEFAULT_INITIAL_FACTOR
         current_interval_days = DEFAULT_INITIAL_INTERVAL
 
@@ -122,44 +137,40 @@ async def calculate_next_review_json_in_string_out(
 
         days_to_add = round(new_interval_days)
         next_review_date_obj = datetime.date.today() + datetime.timedelta(days=days_to_add)
+        iso_date_str = next_review_date_obj.isoformat()  # Format date to "YYYY-MM-DD"
 
-        # Format the date to "YYYY-MM-DD" (ISO format)
-        iso_date_str = next_review_date_obj.isoformat()
-
-        # Construct the output string with the new date format
-        # Example: "[[date:2024-04-26]] 22.95/0.00"
         output_string = f"[[date:{iso_date_str}]] {new_factor:.2f}/{new_interval_days:.2f}"
+        # print(f"INFO: Generated output: {output_string}") # Optional
         return output_string
 
     except ValueError as ve:
+        # print(f"ERROR: ValueError during calculation: {ve}") # Optional
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
-        import traceback
-        print(f"Error during calculation: {e}\n{traceback.format_exc()}")
+        # print(f"ERROR: Unexpected exception: {e}") # Optional
+        # import traceback
+        # print(traceback.format_exc()) # For more detailed local debugging if needed
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
 
 # --- Running the App (for local development) ---
 if __name__ == "__main__":
-    print("Starting Simplified SRS Backend API (v2.7.0)...")
+    print("Starting Simplified SRS Backend API (v2.8.0)...")
     print("Access the docs at http://127.0.0.1:8000/docs")
     print("---")
     print("Example - Existing item (srs string provided in JSON):")
+    # UPDATED srs string in curl example
     print("curl -X POST \"http://127.0.0.1:8000/calculate/\" \\")
     print("  -H \"Content-Type: application/json\" \\")
-    print("  -d \"{\\\"srs\\\": \\\"Fri, Apr 25 23.15/45.62\\\", \\\"signal\\\": 1}\"")
-    print("Expected output string: e.g., '[[date:2024-04-26]] 22.95/0.00' (date will be today's date for interval 0, YYYY-MM-DD format)")
+    print("  -d \"{\\\"srs\\\": \\\"[[date:2028-04-09]] 23.30/1056.10\\\", \\\"signal\\\": 1}\"")
+    print(
+        "Expected output string: e.g., '[[date:2024-04-26]] 23.10/0.00' (date YYYY-MM-DD format, will depend on current date)")
     print("---")
     print("Example - New item (srs field absent or null in JSON):")
     print("curl -X POST \"http://127.0.0.1:8000/calculate/\" \\")
     print("  -H \"Content-Type: application/json\" \\")
     print("  -d \"{\\\"signal\\\": 3}\"")
-    print("Expected output string: e.g., '[[date:2024-04-27]] 2.50/1.00' (date will be tomorrow if today is 2024-04-26, YYYY-MM-DD format)")
+    print(
+        "Expected output string: e.g., '[[date:2024-04-27]] 2.50/1.00' (date YYYY-MM-DD format, will depend on current date)")
     print("---")
-    print("Example - New item (srs field explicitly null):")
-    print("curl -X POST \"http://127.0.0.1:8000/calculate/\" \\")
-    print("  -H \"Content-Type: application/json\" \\")
-    print("  -d \"{\\\"srs\\\": null, \\\"signal\\\": 4}\"")
-    print("Expected output string: e.g., '[[date:2024-04-27]] 2.65/1.00' (date will be tomorrow if today is 2024-04-26, YYYY-MM-DD format)")
-    print("---")
-
     uvicorn.run("srs_api:app", host="127.0.0.1", port=8000, reload=True)
