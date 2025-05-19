@@ -1,10 +1,11 @@
 import datetime
-from fastapi import FastAPI, HTTPException, Body # Body for input
-from pydantic import BaseModel, Field # BaseModel and Field for input model
+from fastapi import FastAPI, HTTPException, Body
+from pydantic import BaseModel, Field
 import uvicorn
 import os
-import re # For parsing the srs string from JSON
+import re
 from typing import Optional
+from starlette.responses import PlainTextResponse # <--- IMPORT THIS
 
 # --- Configuration Constants ---
 FACTOR_MODIFIER = 0.15
@@ -13,12 +14,11 @@ MIN_FACTOR = 1.30
 
 DEFAULT_INITIAL_FACTOR = 2.50
 DEFAULT_INITIAL_INTERVAL = 0.0
-# DEFAULT_SIGNAL_FOR_NEW_ITEM is not needed as signal is always required in input JSON
 
 app = FastAPI(
     title="Simplified Spaced Repetition System (SRS) Calculator",
     description="API to calculate next review date. Input via JSON, Output is a plain string.",
-    version="2.6.0" # Version bump for new JSON input and string output
+    version="2.6.1" # Version bump for fix
 )
 
 # --- Pydantic Model for JSON Input ---
@@ -39,7 +39,7 @@ def calculate_srs_logic(current_interval_days: float, current_factor: float, sig
     if current_interval_days < 0:
         raise ValueError("Current interval days cannot be negative.")
 
-    if signal == 0: # Not used by API directly due to 1-4 input constraint, but logic supports it
+    if signal == 0:
         pass
     elif signal == 1:
         new_factor = max(MIN_FACTOR, current_factor - 0.20)
@@ -65,21 +65,14 @@ def calculate_srs_logic(current_interval_days: float, current_factor: float, sig
 
 # --- API Endpoint ---
 
-# Regex to parse "DayAbbrev, MonAbbrev DayNum Factor/Interval"
-# Example: "Fri, Apr 25 23.15/45.62"
-# Group 1: DayOfWeekAbbrev (e.g., "Fri")
-# Group 2: MonthAbbrev (e.g., "Apr")
-# Group 3: DayNum (e.g., "25")
-# Group 4: Factor (e.g., "23.15")
-# Group 5: Interval (e.g., "45.62")
 SRS_STRING_PATTERN = re.compile(
     r"^([A-Za-z]{3}),\s*([A-Za-z]{3})\s+(\d{1,2})\s+(\d+\.\d+)\/(\d+\.\d+)$"
 )
 
-@app.post("/calculate/", response_class=str) # Explicitly setting response_class to str for plain text
+@app.post("/calculate/", response_class=PlainTextResponse) # <--- CORRECTED HERE
 async def calculate_next_review_json_in_string_out(
-    input_data: SRSInput = Body(...) # Use Body for the whole Pydantic model
-) -> str:
+    input_data: SRSInput = Body(...)
+) -> str: # The function itself still returns a string
     """
     Calculates the next review details based on JSON input.
     Outputs a plain string: "Day, Mon DayNum NewFactor/NewInterval"
@@ -97,10 +90,9 @@ async def calculate_next_review_json_in_string_out(
     """
     current_factor: float
     current_interval_days: float
-    actual_signal: int = input_data.signal # Signal is always present from input_data
+    actual_signal: int = input_data.signal
 
     if input_data.srs:
-        # srs string is provided, parse it
         match = SRS_STRING_PATTERN.match(input_data.srs)
         if not match:
             raise HTTPException(
@@ -108,18 +100,15 @@ async def calculate_next_review_json_in_string_out(
                 detail="Invalid 'srs' string format in JSON. Expected 'Day, Mon DayNum F.FF/I.II', e.g., 'Fri, Apr 25 23.15/45.62'"
             )
         try:
-            # We don't use date parts (group 1, 2, 3) for calculation itself
             current_factor_str = match.group(4)
             current_interval_days_str = match.group(5)
-
             current_factor = float(current_factor_str)
             current_interval_days = float(current_interval_days_str)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid numeric values for factor or interval in 'srs' string.")
-        except IndexError: # Should not happen if regex matches
+        except IndexError:
             raise HTTPException(status_code=400, detail="Could not parse all components from 'srs' string.")
     else:
-        # srs string is NOT provided (or null), use defaults for a new item
         current_factor = DEFAULT_INITIAL_FACTOR
         current_interval_days = DEFAULT_INITIAL_INTERVAL
 
@@ -127,37 +116,31 @@ async def calculate_next_review_json_in_string_out(
         new_interval_days, new_factor = calculate_srs_logic(
             current_interval_days,
             current_factor,
-            actual_signal # This is input_data.signal
+            actual_signal
         )
 
         days_to_add = round(new_interval_days)
         next_review_date_obj = datetime.date.today() + datetime.timedelta(days=days_to_add)
 
-        # Format the date string: "DayAbbrev, MonthAbbrev DayNum" (non-padded day)
         human_readable_date_str = ""
-        if os.name == 'nt': # Windows
+        if os.name == 'nt':
              human_readable_date_str = next_review_date_obj.strftime("%a, %b %#d")
-        else: # Linux/macOS
+        else:
             try:
                 human_readable_date_str = next_review_date_obj.strftime("%a, %b %-d")
-            except ValueError: # Fallback if %-d is not supported
+            except ValueError:
                 try:
-                    human_readable_date_str = next_review_date_obj.strftime("%a, %b %e").lstrip() # %e might add leading space
-                except ValueError: # Further fallback if %e also fails (unlikely for modern Python)
+                    human_readable_date_str = next_review_date_obj.strftime("%a, %b %e").lstrip()
+                except ValueError:
                      human_readable_date_str = next_review_date_obj.strftime("%a, %b %d")
-
-
-        # Fallback to zero-padded day if specific non-padded options fail
-        if not human_readable_date_str:
+        if not human_readable_date_str: # Should be very rare with the fallbacks
             human_readable_date_str = next_review_date_obj.strftime("%a, %b %d")
 
 
-        # Format the final output string
-        # Example: "Sun, Jun 15 22.95/0.00"
         output_string = f"{human_readable_date_str} {new_factor:.2f}/{new_interval_days:.2f}"
-        return output_string
+        return output_string # FastAPI will wrap this string in PlainTextResponse
 
-    except ValueError as ve: # Catch specific errors from our logic
+    except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
         import traceback
@@ -166,7 +149,7 @@ async def calculate_next_review_json_in_string_out(
 
 # --- Running the App (for local development) ---
 if __name__ == "__main__":
-    print("Starting Simplified SRS Backend API (v2.6.0)...")
+    print("Starting Simplified SRS Backend API (v2.6.1)...")
     print("Access the docs at http://127.0.0.1:8000/docs")
     print("---")
     print("Example - Existing item (srs string provided in JSON):")
